@@ -1,0 +1,6 @@
+{
+  "name": "FB BAHI Panel",
+  "description": "Self-hosted Game Server & Cloud VM Control Panel for Docker Minecraft Servers and Incus LXC/KVM Instances.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
