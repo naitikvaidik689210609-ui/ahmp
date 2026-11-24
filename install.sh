@@ -6,9 +6,9 @@ set -euo pipefail
 # Supports: bash <(curl -fsSL https://raw.githubusercontent.com/naitikvaidik689210609-ui/FB-panel/main/install.sh)
 # ==============================================================================
 
-REPO_URL="https://github.com/naitikvaidik689210609-ui/FB-panel.git"
+REPO_URL="https://github.com/naitikvaidik689210609-ui/ahmp.git"
 BRANCH="main"
-TARBALL_URL="https://codeload.github.com/naitikvaidik689210609-ui/FB-panel/tar.gz/refs/heads/${BRANCH}"
+TARBALL_URL="https://codeload.github.com/naitikvaidik689210609-ui/ahmp/tar.gz/refs/heads/${BRANCH}"
 
 INSTALL_DIR="/opt/fbbahi-panel"
 TMP_SRC_DIR="/tmp/fb-panel-src"
