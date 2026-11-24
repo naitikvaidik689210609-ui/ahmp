@@ -3,7 +3,7 @@ set -euo pipefail
 
 # ==============================================================================
 # FB BAHI Panel — Ubuntu (22.04/24.04) & Debian VPS Remote Installer & Manager
-# Supports: bash <(curl -fsSL https://raw.githubusercontent.com/naitikvaidik689210609-ui/FB-panel/main/install.sh)
+# Supports: bash <(curl -fsSL https://raw.githubusercontent.com/naitikvaidik689210609-ui/ahmp/main/install.sh)
 # ==============================================================================
 
 REPO_URL="https://github.com/naitikvaidik689210609-ui/ahmp.git"
