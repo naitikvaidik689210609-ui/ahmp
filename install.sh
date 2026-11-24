@@ -11,8 +11,8 @@ BRANCH="main"
 TARBALL_URL="https://codeload.github.com/naitikvaidik689210609-ui/ahmp/tar.gz/refs/heads/${BRANCH}"
 
 INSTALL_DIR="/opt/fbbahi-panel"
-TMP_SRC_DIR="/tmp/fb-panel-src"
-TMP_TARBALL="/tmp/fb-panel-src.tar.gz"
+TMP_SRC_DIR="/tmp/ahmp-panel-src"
+TMP_TARBALL="/tmp/ahmp-panel-src.tar.gz"
 SERVICE_NAME="fbbahi-panel.service"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}"
 BACKUP_DIR="/var/backups/fbbahi-panel"
@@ -26,7 +26,7 @@ RED="\033[1;31m"
 RESET="\033[0m"
 
 if [[ "${EUID}" -ne 0 ]]; then
-  echo -e "${RED}[Error] This installer must be run as root. Try: sudo bash <(curl -fsSL https://raw.githubusercontent.com/naitikvaidik689210609-ui/FB-panel/main/install.sh)${RESET}"
+  echo -e "${RED}[Error] This installer must be run as root. Try: sudo bash <(curl -fsSL https://raw.githubusercontent.com/naitikvaidik689210609-ui/ahmp/main/install.sh)${RESET}"
   exit 1
 fi
 
@@ -50,69 +50,181 @@ EOF
   echo -e "${PURPLE}  =================================================${RESET}\n"
 }
 
+# ----------------------------------------------------------------------------
+# Smart Dependency Checker
+# Required runtime: Node.js >=22.12.0 (Vite 8 / OpenAI / better-sqlite3)
+# Missing system packages are installed automatically where supported.
+# Docker and Incus are optional integrations: installation failures are shown
+# clearly but do not prevent the web panel itself from being installed.
+# ----------------------------------------------------------------------------
+command_exists() { command -v "$1" >/dev/null 2>&1; }
+
+version_at_least() {
+  # Returns success when $1 >= $2 (semantic versions, e.g. 22.12.0).
+  [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]
+}
+
+show_check() {
+  local label="$1" status="$2" detail="${3:-}"
+  if [[ "$status" == "ok" ]]; then
+    echo -e "  ${GREEN}[OK]${RESET} ${label}${detail:+ — ${detail}}"
+  elif [[ "$status" == "missing" ]]; then
+    echo -e "  ${YELLOW}[MISSING]${RESET} ${label}${detail:+ — ${detail}}"
+  else
+    echo -e "  ${RED}[FIX NEEDED]${RESET} ${label}${detail:+ — ${detail}}"
+  fi
+}
+
 ensure_fetch_tools() {
-  local need_apt=0
+  local missing=()
   local cmd
   for cmd in git curl tar rsync openssl; do
-    if ! command -v "${cmd}" >/dev/null 2>&1; then
-      need_apt=1
-      break
-    fi
+    command_exists "$cmd" || missing+=("$cmd")
   done
-
-  if [[ "${need_apt}" -eq 1 ]]; then
-    echo -e "${CYAN}[Prep] Installing required fetch tools (git, curl, tar, rsync, openssl)...${RESET}"
-    apt-get update -y
-    apt-get install -y curl wget git ca-certificates gnupg lsb-release tar rsync openssl
+  if ((${#missing[@]})); then
+    echo -e "${YELLOW}[Checker] Missing fetch tools: ${missing[*]}. Installing...${RESET}"
+    apt-get install -y git curl wget ca-certificates gnupg lsb-release tar rsync openssl
   fi
 }
 
 ensure_node_runtime() {
-  if ! command -v node >/dev/null 2>&1 || [[ "$(node -v | sed 's/v//' | cut -d. -f1)" -lt 18 ]]; then
-    echo -e "${CYAN}[Runtime] Installing Node.js 20.x LTS...${RESET}"
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-    apt-get install -y nodejs
+  local current="" major=0
+  if command_exists node; then
+    current="$(node -p 'process.versions.node' 2>/dev/null || true)"
+  fi
+
+  if [[ -n "$current" ]] && version_at_least "$current" "22.12.0"; then
+    show_check "Node.js >=22.12.0" ok "v${current}"
   else
-    echo -e "${GREEN}[OK] Node.js $(node -v) already installed.${RESET}"
+    show_check "Node.js >=22.12.0" fix "${current:-not installed}; installing Node.js 22 LTS"
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+    apt-get install -y nodejs
+  fi
+
+  if ! command_exists node; then
+    echo -e "${RED}[Dependency Error] Node.js installation did not provide the 'node' command.${RESET}"
+    return 1
+  fi
+  current="$(node -p 'process.versions.node' 2>/dev/null || true)"
+  if ! version_at_least "$current" "22.12.0"; then
+    echo -e "${RED}[Dependency Error] Node.js v${current:-unknown} is still too old. Required: >=22.12.0.${RESET}"
+    return 1
+  fi
+  show_check "Node.js runtime" ok "v${current}"
+
+  if command_exists npm; then
+    show_check "NPM" ok "v$(npm --version 2>/dev/null || echo unknown)"
+  else
+    echo -e "${YELLOW}[Checker] NPM is missing; reinstalling Node.js package...${RESET}"
+    apt-get install -y nodejs
+  fi
+  if ! command_exists npm; then
+    echo -e "${RED}[Dependency Error] NPM is still unavailable after Node.js installation.${RESET}"
+    return 1
   fi
 }
 
-install_system_packages() {
-  echo -e "${CYAN}[1/5] Updating apt packages and installing prerequisites...${RESET}"
-  apt-get update -y
-  apt-get install -y curl wget git ca-certificates gnupg lsb-release sqlite3 build-essential python3 make g++ rsync tar openssl
-
-  echo -e "${CYAN}[2/5] Checking Node.js runtime...${RESET}"
-  ensure_node_runtime
-
-  if ! command -v docker >/dev/null 2>&1; then
-    echo -e "${CYAN}[3/5] Installing Docker Engine...${RESET}"
-    curl -fsSL https://get.docker.com | sh
-    systemctl enable --now docker
+ensure_docker() {
+  if command_exists docker; then
+    show_check "Docker" ok "$(docker --version 2>/dev/null | head -n1)"
   else
-    echo -e "${GREEN}[OK] Docker already installed.${RESET}"
-    systemctl enable --now docker || true
-  fi
-
-  if ! command -v incus >/dev/null 2>&1; then
-    echo -e "${CYAN}[4/5] Installing Incus (LXC & KVM Manager)...${RESET}"
-    if apt-cache show incus >/dev/null 2>&1; then
-      apt-get install -y incus
+    show_check "Docker" missing "installing Docker Engine"
+    if curl -fsSL https://get.docker.com | sh; then
+      systemctl enable --now docker || true
+      command_exists docker && show_check "Docker" ok "installed" || echo -e "${YELLOW}[Optional] Docker command is unavailable; container features may not work.${RESET}"
     else
-      mkdir -p /etc/apt/keyrings
-      curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
-      local codename
-      codename="$(. /etc/os-release && echo "${VERSION_CODENAME}")"
-      echo "deb [signed-by=/etc/apt/keyrings/zabbly.asc] https://pkgs.zabbly.com/incus/stable ${codename} main" > /etc/apt/sources.list.d/zabbly-incus-stable.list
-      apt-get update -y
-      apt-get install -y incus
+      echo -e "${YELLOW}[Optional] Docker installation failed. Panel web UI can still be installed; Docker features will remain unavailable.${RESET}"
     fi
-    systemctl enable --now incus || true
-    incus admin init --auto || true
-  else
-    echo -e "${GREEN}[OK] Incus already installed.${RESET}"
-    systemctl enable --now incus || true
   fi
+  if command_exists docker; then systemctl enable --now docker 2>/dev/null || true; fi
+}
+
+ensure_incus() {
+  if command_exists incus; then
+    show_check "Incus" ok "installed"
+    systemctl enable --now incus 2>/dev/null || true
+    return 0
+  fi
+
+  show_check "Incus" missing "installing Incus integration"
+  if apt-cache show incus >/dev/null 2>&1; then
+    if apt-get install -y incus; then :; else
+      echo -e "${YELLOW}[Optional] Incus installation failed; VM/container integration may be unavailable.${RESET}"
+      return 0
+    fi
+  else
+    mkdir -p /etc/apt/keyrings
+    if curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc; then
+      local codename
+      codename="$(. /etc/os-release && echo "${VERSION_CODENAME:-}")"
+      if [[ -n "$codename" ]]; then
+        echo "deb [signed-by=/etc/apt/keyrings/zabbly.asc] https://pkgs.zabbly.com/incus/stable ${codename} main" > /etc/apt/sources.list.d/zabbly-incus-stable.list
+        apt-get update -y || true
+        apt-get install -y incus || echo -e "${YELLOW}[Optional] Incus could not be installed; VM integration may be unavailable.${RESET}"
+      else
+        echo -e "${YELLOW}[Optional] Could not detect Debian/Ubuntu codename for Incus repository.${RESET}"
+      fi
+    else
+      echo -e "${YELLOW}[Optional] Could not download Incus repository key; skipping Incus.${RESET}"
+    fi
+  fi
+  if command_exists incus; then
+    systemctl enable --now incus 2>/dev/null || true
+    incus admin init --auto 2>/dev/null || true
+    show_check "Incus" ok "installed"
+  fi
+}
+
+check_and_install_dependencies() {
+  echo -e "\n${PURPLE}========== SMART DEPENDENCY CHECKER ==========${RESET}"
+  if ! command_exists apt-get; then
+    echo -e "${RED}[Unsupported OS] This installer currently supports Ubuntu/Debian systems with apt.${RESET}"
+    return 1
+  fi
+  if [[ -r /etc/os-release ]]; then
+    . /etc/os-release
+    case "${ID:-} ${ID_LIKE:-}" in
+      *ubuntu*|*debian*) echo -e "${GREEN}[OK]${RESET} Operating system: ${PRETTY_NAME:-Ubuntu/Debian}" ;;
+      *) echo -e "${YELLOW}[Warning] OS is not explicitly supported. Continuing because apt is available.${RESET}" ;;
+    esac
+  fi
+
+  echo -e "${CYAN}[Checker] Refreshing package lists...${RESET}"
+  if ! apt-get update -y; then
+    echo -e "${RED}[Dependency Error] apt package index update failed. Check VPS internet/DNS and apt sources, then retry.${RESET}"
+    return 1
+  fi
+
+  local packages=(curl wget git ca-certificates gnupg lsb-release sqlite3 build-essential python3 make g++ rsync tar openssl)
+  local missing_packages=()
+  local package
+  for package in "${packages[@]}"; do
+    if dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed'; then
+      show_check "$package" ok
+    else
+      show_check "$package" missing
+      missing_packages+=("$package")
+    fi
+  done
+
+  if ((${#missing_packages[@]})); then
+    echo -e "${CYAN}[Checker] Installing missing system packages: ${missing_packages[*]}${RESET}"
+    if ! apt-get install -y "${missing_packages[@]}"; then
+      echo -e "${RED}[Dependency Error] Could not install required packages: ${missing_packages[*]}. See apt output above.${RESET}"
+      return 1
+    fi
+  else
+    echo -e "${GREEN}[Checker] All base system packages are already installed.${RESET}"
+  fi
+
+  ensure_node_runtime || return 1
+  ensure_docker
+  ensure_incus
+  echo -e "${GREEN}[Checker] Dependency scan complete.${RESET}\n"
+}
+
+install_system_packages() {
+  check_and_install_dependencies
 }
 
 fetch_github_source() {
@@ -221,13 +333,28 @@ EOF
   fi
 
   cd "${INSTALL_DIR}"
+  local npm_log="${INSTALL_DIR}/install-npm.log"
   if [[ -f "${INSTALL_DIR}/server.js" && -f "${INSTALL_DIR}/dist/index.html" ]]; then
     echo -e "${CYAN}[NPM] Installing production dependencies (--omit=dev)...${RESET}"
-    npm install --omit=dev --no-audit --no-fund
+    if ! npm install --omit=dev --no-audit --no-fund 2>&1 | tee "${npm_log}"; then
+      echo -e "${RED}[Install Error] NPM dependency installation failed.${RESET}"
+      echo -e "${YELLOW}Log saved at: ${npm_log}${RESET}"
+      echo -e "${YELLOW}Check network/DNS, npm registry access and package compatibility, then retry Update.${RESET}"
+      return 1
+    fi
   else
-    echo -e "${CYAN}[Build] Prebuilt dist/server.js not found; installing build dependencies and compiling...${RESET}"
-    npm install --no-audit --no-fund
-    npm run build
+    echo -e "${CYAN}[Build] Installing dependencies and compiling the panel...${RESET}"
+    if ! npm install --no-audit --no-fund 2>&1 | tee "${npm_log}"; then
+      echo -e "${RED}[Install Error] NPM dependency installation failed.${RESET}"
+      echo -e "${YELLOW}Log saved at: ${npm_log}${RESET}"
+      return 1
+    fi
+    if ! npm run build 2>&1 | tee -a "${npm_log}"; then
+      echo -e "${RED}[Build Error] Panel build failed. Full output: ${npm_log}${RESET}"
+      echo -e "${YELLOW}The installer checked system dependencies first. Review the final 60 log lines:${RESET}"
+      tail -n 60 "${npm_log}" || true
+      return 1
+    fi
   fi
 
   if [[ ! -f "${INSTALL_DIR}/server.js" ]]; then
@@ -367,8 +494,7 @@ action_reinstall() {
     fi
   fi
 
-  apt-get update -y
-  apt-get install -y curl wget git ca-certificates sqlite3 build-essential python3 make g++ rsync tar openssl
+  check_and_install_dependencies
   deploy_application_files
   write_systemd_service
   echo -e "${GREEN}[Success] FB BAHI Panel reinstalled and restarted.${RESET}"
@@ -397,6 +523,7 @@ action_update() {
   fi
 
   echo -e "${CYAN}[Update] Fetching latest updates from GitHub (${BRANCH}) while preserving DB & .env...${RESET}"
+  check_and_install_dependencies
   deploy_application_files
   write_systemd_service
   echo -e "${GREEN}[Success] FB BAHI Panel updated and restarted.${RESET}"
